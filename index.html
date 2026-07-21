@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>MM Intelligence — Painel de Controle</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',system-ui,sans-serif;min-height:100vh;padding:24px 20px}
+#header{display:flex;align-items:center;gap:12px;margin-bottom:20px;max-width:1100px;margin-left:auto;margin-right:auto}
+#header h1{font-size:20px}
+#header .badge{background:rgba(63,185,80,.15);color:#3fb950;border:1px solid rgba(63,185,80,.3);padding:4px 10px;border-radius:6px;font-size:11px;font-weight:700}
+.container{max-width:1100px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px}
+.card h3{font-size:14px;margin-bottom:12px;color:#58a6ff;display:flex;align-items:center;gap:8px}
+.card p{font-size:12px;color:#8b949e;margin-bottom:14px}
+.btn{background:#1f6feb;border:none;color:#fff;padding:10px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;width:100%}
+.btn:hover{background:#388bfd}
+.btn:disabled{background:#30363d;cursor:not-allowed}
+.btn-secondary{background:#238636}
+.btn-secondary:hover{background:#2ea043}
+input[type=file], select, input[type=text]{width:100%;background:#0d1117;border:1px solid #30363d;color:#e6edf3;padding:8px;border-radius:6px;font-size:12px;margin-bottom:10px}
+#full-cycle{grid-column:1/3}
+#log{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:14px;font-family:'Consolas',monospace;font-size:12px;max-height:400px;overflow-y:auto;white-space:pre-wrap;margin-top:12px;line-height:1.6}
+.log-ok{color:#3fb950}
+.log-err{color:#f85149}
+.log-info{color:#8b949e}
+.log-title{color:#58a6ff;font-weight:700}
+#diag-result{background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:16px;margin-top:12px;font-size:13px;max-height:400px;overflow-y:auto}
+#diag-result h4{color:#58a6ff;margin-bottom:8px;font-size:12px;text-transform:uppercase}
+#diag-result .item{padding:4px 0;color:#e6edf3}
+#diag-result .opp{color:#3fb950}
+#diag-result .risk{color:#f85149}
+#diag-result .warn{color:#e3b341}
+</style>
+</head>
+<body>
+<div id="header">
+  <h1>🧠 MM Intelligence — Painel de Controle</h1>
+  <span class="badge">Sistema Atual</span>
+</div>
+
+<div class="container">
+  <div class="card" id="full-cycle">
+    <h3>🔄 Rodar Ciclo Completo</h3>
+    <p>Product Discovery → MarketDNA → Similarity → Formação de Mercados → MarketHealth Base — na ordem certa, um clique.</p>
+    <button class="btn btn-secondary" id="btn-ciclo">Rodar Ciclo Completo</button>
+    <div id="log"></div>
+  </div>
+
+  <div class="card">
+    <h3>📥 Importar Sinais (CSV)</h3>
+    <p>Export de qualquer ferramenta (Minea, Dropship.io, PowerAdSpy...). Detecta colunas automaticamente.</p>
+    <input type="text" id="nome-coletor" placeholder="Nome do coletor (ex: Minea)">
+    <input type="file" id="csv-file" accept=".csv">
+    <button class="btn" id="btn-importar">Importar CSV</button>
+  </div>
+
+  <div class="card">
+    <h3>🔍 Diagnóstico de Mercado</h3>
+    <p>Rule Engine + Signal Intelligence + Recommendation Assistant, sob demanda, pra 1 mercado.</p>
+    <select id="select-mercado"><option value="">Carregando mercados...</option></select>
+    <button class="btn" id="btn-diagnostico">Gerar Diagnóstico</button>
+    <div id="diag-result" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+const SUPABASE_URL = "https://tazyeczbbgspqbyluynf.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_olCaCIksSYJGOaAYInXHeA_2pm-gaoF";
+
+async function sb(path, opts = {}) {
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...opts,
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      ...(opts.headers || {}),
+    },
+  });
+  const text = await r.text();
+  if (!r.ok) throw new Error(`${path} falhou: ${r.status} ${text}`);
+  return text ? JSON.parse(text) : null;
+}
+
+const logEl = document.getElementById("log");
+function log(msg, cls) {
+  const line = document.createElement("div");
+  if (cls) line.className = cls;
+  line.textContent = msg;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+// ═══ INTEGRITY GATE (mesma lógica de integrity_gate.js) ═══
+const REQUISITO_MINIMO = { intelligence_engine: "observado" };
+const ORDEM_ESTAGIOS = ["sintetico", "descoberto", "observado", "validado", "canonizado", "elegivel_inteligencia", "elegivel_recomendacao"];
+
+async function podeUtilizarLote(kws, uso) {
+  const bloqueados = [];
+  for (const kw of kws) {
+    const rows = await sb(`products?kw=eq.${encodeURIComponent(kw)}&select=data_status`);
+    const status = rows[0]?.data_status;
+    if (!status || status === "sintetico" || status === "rejeitado") {
+      bloqueados.push({ kw, motivo: `"${kw}" está em "${status}" — não pode ser usado.` });
+      continue;
+    }
+    const minimo = REQUISITO_MINIMO[uso];
+    if (ORDEM_ESTAGIOS.indexOf(status) < ORDEM_ESTAGIOS.indexOf(minimo)) {
+      bloqueados.push({ kw, motivo: `"${kw}" está em "${status}", precisa de pelo menos "${minimo}".` });
+    }
+  }
+  return { permitido: bloqueados.length === 0, bloqueados };
+}
+
+// ═══ PRODUCT DISCOVERY ENGINE ═══
+function normalizarNome(nome) { return nome.toLowerCase().replace(/[^a-z0-9\s]/g, "").replace(/\s+/g, " ").trim(); }
+
+function calcularCandidateScore(sinal) {
+  const pesos = { anuncios_ativos: 0.3, dias_ativo: 0.2, anunciantes: 0.3, criativos: 0.2 };
+  let scoreBruto = 0, pesoTotal = 0;
+  if (typeof sinal.anuncios_ativos === "number") { scoreBruto += Math.min(sinal.anuncios_ativos / 200, 1) * pesos.anuncios_ativos; pesoTotal += pesos.anuncios_ativos; }
+  if (typeof sinal.dias_ativo === "number") { scoreBruto += Math.min(sinal.dias_ativo / 90, 1) * pesos.dias_ativo; pesoTotal += pesos.dias_ativo; }
+  if (typeof sinal.anunciantes === "number") { scoreBruto += Math.min(sinal.anunciantes / 50, 1) * pesos.anunciantes; pesoTotal += pesos.anunciantes; }
+  if (typeof sinal.criativos === "number") { scoreBruto += Math.min(sinal.criativos / 30, 1) * pesos.criativos; pesoTotal += pesos.criativos; }
+  const score = pesoTotal > 0 ? Math.round((scoreBruto / pesoTotal) * 100) : 0;
+  const cobertura = Math.round((pesoTotal / 1) * 100);
+  return { score, cobertura };
+}
+
+async function rodarProductDiscovery() {
+  log("[1/4] Product Discovery Engine...", "log-title");
+  const pendentes = await sb("collector_signals?processado=eq.false&select=id,coletor,produto_nome_bruto,sinal");
+  if (!pendentes.length) { log("  Nenhum sinal pendente.", "log-info"); return; }
+
+  const produtos = await sb("products?select=kw");
+  for (const s of pendentes) {
+    const normalizado = normalizarNome(s.produto_nome_bruto);
+    const duplicado = produtos.find((p) => normalizarNome(p.kw) === normalizado);
+    const { score, cobertura } = calcularCandidateScore(s.sinal);
+
+    if (duplicado) {
+      log(`  → "${s.produto_nome_bruto}" já existe como "${duplicado.kw}" — atualizando.`, "log-info");
+    } else {
+      await sb("products", { method: "POST", body: JSON.stringify([{ kw: s.produto_nome_bruto, niche: "A confirmar", data_status: "descoberto", data_status_metodo: `Collector: ${s.coletor} | Score: ${score} (cobertura ${cobertura}%)` }]) });
+      log(`  → NOVO candidato: "${s.produto_nome_bruto}" (Score ${score}/100, cobertura ${cobertura}%)`, "log-ok");
+      produtos.push({ kw: s.produto_nome_bruto });
+    }
+    await sb(`collector_signals?id=eq.${s.id}`, { method: "PATCH", body: JSON.stringify({ processado: true }) });
+  }
+}
+
+// ═══ MARKET DNA BUILDER ═══
+const NICHE_BASE = {
+  "Dor e Ortopédico": { categoria_funcional: "recovery", problema_resolvido: ["dor localizada","limitação de movimento"], publico_alvo: ["atletas","pós-cirúrgico","idosos"] },
+  "Cuidados Capilares": { categoria_funcional: "haircare", problema_resolvido: ["queda de cabelo","frizz","danos capilares"], publico_alvo: ["homens e mulheres com preocupação capilar"] },
+  "A confirmar": { categoria_funcional: "outro", problema_resolvido: [], publico_alvo: [] },
+};
+const MECANISMO_PATTERNS = [
+  { regex: /ice|cold|cool/i, tag: "frio" }, { regex: /heat|thermal|warm|infrared/i, tag: "calor" },
+  { regex: /massage|massager|roller|vibrat/i, tag: "massagem/vibração" }, { regex: /compress|brace|belt|sleeve|wrap/i, tag: "compressão" },
+  { regex: /serum|cream|oil|balm|lotion/i, tag: "tópico" }, { regex: /gummies|capsules|tablets|drops|powder|complex/i, tag: "ingestão" },
+  { regex: /led|light|rf|radiofrequency/i, tag: "luz/energia" }, { regex: /electric|rechargeable|device|wand|tool/i, tag: "dispositivo eletrônico" },
+  { regex: /brush|comb|scraper|file/i, tag: "ferramenta manual" },
+];
+const PRODUCT_ROLE_PATTERNS = [
+  { regex: /belt|brace|sleeve|jacket|socks|glasses|mouthguard|corrector|band|splint|wrap|turban/i, role: "Apparel" },
+  { regex: /massager|roller|gun|wand|trimmer|scraper|tracker|monitor|dryer|file|device|machine|stimulator|groomer|comb device|brush$/i, role: "Device" },
+  { regex: /gummies|capsules|tablets|drops|powder|lozenges|softgels|shake|tea\b/i, role: "Consumable" },
+  { regex: /serum|cream|oil$|balm|lotion|mask|patch|complex|gel\b|scrub/i, role: "Treatment" },
+  { regex: /applicator|bottle|holder|case|pillowcase|pillow|diffuser|cushion|separators?/i, role: "Accessory" },
+];
+const MARKET_ROLE_MAP = { Treatment:"Hero Product", Supplement:"Hero Product", Apparel:"Hero Product", Device:"Tool", Accessory:"Accessory", Consumable:"Consumable", Other:"Hero Product" };
+const COMMERCIAL_INTENT_MAP = { Treatment:"Core Product", Supplement:"Core Product", Apparel:"Core Product", Device:"Complementary Product", Accessory:"Complementary Product", Consumable:"Complementary Product", Other:"Core Product" };
+
+async function rodarMarketDNA() {
+  log("[2/4] MarketDNA Builder...", "log-title");
+  const produtos = await sb("products?data_status=neq.sintetico&select=kw,niche");
+  if (!produtos.length) { log("  Nenhum produto real (não-sintético) encontrado.", "log-info"); return; }
+
+  for (const p of produtos) {
+    const base = NICHE_BASE[p.niche] || { categoria_funcional: "outro", problema_resolvido: [], publico_alvo: [] };
+    const mecanismo = MECANISMO_PATTERNS.filter((m) => m.regex.test(p.kw)).map((m) => m.tag);
+    let productRole = "Other";
+    for (const pr of PRODUCT_ROLE_PATTERNS) { if (pr.regex.test(p.kw)) { productRole = pr.role; break; } }
+
+    const atributos = {
+      problema_resolvido: base.problema_resolvido, mecanismo_de_acao: mecanismo, publico_alvo: base.publico_alvo,
+      categoria_funcional: base.categoria_funcional, product_role: productRole,
+      market_role: MARKET_ROLE_MAP[productRole] || "Hero Product", commercial_intent: COMMERCIAL_INTENT_MAP[productRole] || "Core Product",
+      palavras_chave: p.kw.toLowerCase().split(/\s+/),
+    };
+    const confianca_dna = Math.round(([atributos.problema_resolvido.length>0, mecanismo.length>0, atributos.publico_alvo.length>0, atributos.categoria_funcional!=="outro", productRole!=="Other"].filter(Boolean).length / 5) * 100);
+
+    await sb("market_dna?on_conflict=produto_kw", { method: "POST", body: JSON.stringify([{ produto_kw: p.kw, atributos, origem_por_atributo: {}, confianca_dna, atualizado_em: new Date().toISOString() }]), headers: { Prefer: "resolution=merge-duplicates" } });
+    log(`  ✓ ${p.kw} — confiança ${confianca_dna}%, role: ${productRole}`, "log-ok");
+  }
+}
+
+// ═══ SIMILARITY + MARKETS ═══
+function jaccard(a, b) {
+  const setA = new Set(a), setB = new Set(b);
+  if (!setA.size && !setB.size) return 0;
+  const inter = [...setA].filter((x) => setB.has(x)).length;
+  return new Set([...setA, ...setB]).size === 0 ? 0 : inter / new Set([...setA, ...setB]).size;
+}
+const PESOS = { product_role:.20, mecanismo_de_acao:.15, categoria_funcional:.15, market_role:.15, publico_alvo:.10, problema_resolvido:.15, commercial_intent:.10 };
+
+async function rodarSimilarity() {
+  log("[3/4] Similarity + Formação de Mercados...", "log-title");
+  const dnaRows = await sb("market_dna?select=produto_kw,atributos");
+  const produtos = await sb("products?data_status=neq.sintetico&select=kw");
+  const kwsReais = new Set(produtos.map((p) => p.kw));
+  const dnaReais = dnaRows.filter((d) => kwsReais.has(d.produto_kw));
+
+  if (dnaReais.length < 2) { log("  Menos de 2 produtos reais com DNA — nada a comparar ainda.", "log-info"); return; }
+
+  const scores = [];
+  for (let i = 0; i < dnaReais.length; i++) {
+    for (let j = i + 1; j < dnaReais.length; j++) {
+      const a = dnaReais[i].atributos, b = dnaReais[j].atributos;
+      let score = 0;
+      score += (a.product_role === b.product_role ? 1 : 0) * PESOS.product_role;
+      score += jaccard(a.mecanismo_de_acao, b.mecanismo_de_acao) * PESOS.mecanismo_de_acao;
+      score += (a.categoria_funcional === b.categoria_funcional ? 1 : 0) * PESOS.categoria_funcional;
+      score += (a.market_role === b.market_role ? 1 : 0) * PESOS.market_role;
+      score += jaccard(a.publico_alvo, b.publico_alvo) * PESOS.publico_alvo;
+      score += jaccard(a.problema_resolvido, b.problema_resolvido) * PESOS.problema_resolvido;
+      score += (a.commercial_intent === b.commercial_intent ? 1 : 0) * PESOS.commercial_intent;
+      if (score >= 0.4) scores.push({ produto_a: dnaReais[i].produto_kw, produto_b: dnaReais[j].produto_kw, score_total: +score.toFixed(4), breakdown: [] });
+    }
+  }
+  if (scores.length) await sb("similarity_scores", { method: "POST", body: JSON.stringify(scores) });
+
+  const parent = {};
+  const find = (x) => { if (!(x in parent)) parent[x] = x; if (parent[x] !== x) parent[x] = find(parent[x]); return parent[x]; };
+  const union = (a, b) => { const ra = find(a), rb = find(b); if (ra !== rb) parent[ra] = rb; };
+  scores.filter((s) => s.score_total >= 0.8).forEach((s) => union(s.produto_a, s.produto_b));
+
+  const clusters = {};
+  Object.keys(parent).forEach((kw) => { const root = find(kw); if (!clusters[root]) clusters[root] = []; clusters[root].push(kw); });
+  const validos = Object.values(clusters).filter((c) => c.length >= 2);
+
+  for (const membros of validos) {
+    const nome = `Mercado: ${membros[0]}`;
+    const existentes = await sb(`markets?nome=eq.${encodeURIComponent(nome)}&select=id`);
+    if (existentes.length) continue;
+    const [market] = await sb("markets", { method: "POST", body: JSON.stringify([{ nome, criado_por: "auto" }]), headers: { Prefer: "return=representation" } });
+    await sb("market_members", { method: "POST", body: JSON.stringify(membros.map((kw) => ({ market_id: market.id, produto_kw: kw, status: "confirmado" }))) });
+    log(`  ✓ Mercado criado: "${nome}" (${membros.length} produtos)`, "log-ok");
+  }
+  if (!validos.length) log("  Nenhum mercado novo formado (score < 0.80 em todos os pares).", "log-info");
+}
+
+// ═══ MARKETHEALTH BASE ═══
+async function rodarMarketHealth() {
+  log("[4/4] MarketHealth Base...", "log-title");
+  const markets = await sb("markets?select=id,nome");
+  for (const market of markets) {
+    const membros = await sb(`market_members?market_id=eq.${market.id}&status=eq.confirmado&select=produto_kw`);
+    if (!membros.length) continue;
+    const kws = membros.map((m) => m.produto_kw);
+    const dnaRows = await sb(`market_dna?produto_kw=in.(${kws.map(encodeURIComponent).join(",")})&select=confianca_dna,atributos`);
+    if (!dnaRows.length) continue;
+    const roles = new Set(dnaRows.map((d) => d.atributos.product_role));
+    const heroCount = dnaRows.filter((d) => d.atributos.market_role === "Hero Product").length;
+    const confMedia = dnaRows.reduce((s, d) => s + d.confianca_dna, 0) / dnaRows.length;
+    const maturidade = membros.length >= 5 && roles.size >= 2 ? "consolidado" : membros.length >= 3 ? "em_formacao" : "inicial";
+
+    await sb("market_health_base", { method: "POST", body: JSON.stringify([{ market_id: market.id, produtos_count: membros.length, diversidade_nichos: 1, diversidade_roles: roles.size, hero_products_count: heroCount, confianca_media_dna: +confMedia.toFixed(2), similarity_media: 0, maturidade, calculado_em: new Date().toISOString() }]) });
+    log(`  ✓ ${market.nome} — ${membros.length} produtos, maturidade: ${maturidade}`, "log-ok");
+  }
+}
+
+document.getElementById("btn-ciclo").onclick = async () => {
+  const btn = document.getElementById("btn-ciclo");
+  btn.disabled = true; logEl.innerHTML = "";
+  try {
+    await rodarProductDiscovery();
+    await rodarMarketDNA();
+    await rodarSimilarity();
+    await rodarMarketHealth();
+    log("═══ CICLO CONCLUÍDO ═══", "log-title");
+    carregarMercados();
+  } catch (e) {
+    log("ERRO: " + e.message, "log-err");
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// ═══ IMPORTAR CSV ═══
+const MAPA_COLUNAS = {
+  produto_nome: ["product","product name","nome","produto","title","ad title","name"],
+  anuncios_ativos: ["ads","active ads","number of ads","anuncios","anúncios ativos","ad count"],
+  dias_ativo: ["days active","days running","dias ativo","duration","active since (days)"],
+  anunciantes: ["advertisers","unique advertisers","anunciantes","advertiser count"],
+  criativos: ["creatives","creative count","criativos","number of creatives"],
+};
+
+function parseCSV(conteudo) {
+  const delim = conteudo.split("\n")[0].includes(";") ? ";" : ",";
+  const linhas = conteudo.split(/\r?\n/).filter((l) => l.trim());
+  const parseLinha = (linha) => {
+    const campos = []; let atual = "", dentro = false;
+    for (const c of linha) {
+      if (c === '"') { dentro = !dentro; continue; }
+      if (c === delim && !dentro) { campos.push(atual.trim()); atual = ""; continue; }
+      atual += c;
+    }
+    campos.push(atual.trim());
+    return campos;
+  };
+  const cabecalho = parseLinha(linhas[0]).map((h) => h.toLowerCase().trim());
+  return { cabecalho, linhasDados: linhas.slice(1).map(parseLinha) };
+}
+
+document.getElementById("btn-importar").onclick = async () => {
+  const coletor = document.getElementById("nome-coletor").value.trim() || "Manual";
+  const file = document.getElementById("csv-file").files[0];
+  if (!file) { alert("Escolha um arquivo CSV primeiro."); return; }
+
+  const texto = await file.text();
+  const { cabecalho, linhasDados } = parseCSV(texto);
+  const registros = [];
+
+  for (const valores of linhasDados) {
+    const mapeado = {};
+    cabecalho.forEach((col, i) => {
+      for (const [campo, sinonimos] of Object.entries(MAPA_COLUNAS)) {
+        if (sinonimos.includes(col)) {
+          const num = parseFloat(valores[i]);
+          mapeado[campo] = campo === "produto_nome" ? valores[i] : (isNaN(num) ? valores[i] : num);
+        }
+      }
+    });
+    if (mapeado.produto_nome) {
+      registros.push({ coletor, produto_nome_bruto: mapeado.produto_nome, sinal: { ...mapeado, produto_nome: undefined }, processado: false });
+    }
+  }
+
+  if (!registros.length) { alert("Nenhuma linha válida encontrada (verifique se tem coluna de nome de produto)."); return; }
+  await sb("collector_signals", { method: "POST", body: JSON.stringify(registros) });
+  alert(`${registros.length} sinal(is) importado(s) de "${coletor}". Agora clique em "Rodar Ciclo Completo".`);
+};
+
+// ═══ TRADUÇÃO PT-BR (palavra por palavra, aproximada) ═══
+const DICIONARIO_PT = {
+  hair: "cabelo", growth: "crescimento", serum: "sérum", oil: "óleo", cream: "creme",
+  mask: "máscara", face: "rosto", facial: "facial", pillow: "travesseiro", sleep: "sono",
+  eye: "olho", eyes: "olhos", knee: "joelho", back: "costas", neck: "pescoço",
+  shoulder: "ombro", foot: "pé", pain: "dor", relief: "alívio", support: "suporte",
+  brace: "órtese", belt: "cinto", sleeve: "manga", wrap: "envoltório", compression: "compressão",
+  ice: "gelo", cold: "frio", heat: "calor", hot: "quente", pack: "compressa",
+  massage: "massagem", massager: "massageador", roller: "rolo", device: "dispositivo",
+  gun: "pistola", led: "led", light: "luz", anti: "anti", aging: "envelhecimento",
+  skin: "pele", scalp: "couro cabeludo", brush: "escova", comb: "pente", applicator: "aplicador",
+  bottle: "frasco", cap: "touca", vitamin: "vitamina", gummies: "gomas", capsules: "cápsulas",
+  drops: "gotas", powder: "pó", complex: "complexo", tea: "chá", coffee: "café",
+  blend: "mistura", weight: "peso", trainer: "treinador", monitor: "monitor",
+  tracker: "rastreador", pet: "pet", baby: "bebê", nursing: "amamentação", teeth: "dentes",
+  whitening: "clareamento", toothbrush: "escova de dente", nail: "unha", dryer: "secador",
+  beard: "barba", body: "corpo", frizz: "frizz", straightening: "alisamento",
+  wrinkle: "ruga", firming: "firmeza", collagen: "colágeno", acid: "ácido", hyaluronic: "hialurônico",
+  retinol: "retinol", scrubber: "esfoliador", pro: "pro", plus: "plus", kit: "kit",
+  set: "conjunto", tool: "ferramenta", pad: "almofada", socks: "meias", glasses: "óculos",
+  blue: "azul", pressure: "pressão", blood: "sangue", oximeter: "oxímetro",
+  thermometer: "termômetro", purifier: "purificador", air: "ar", detox: "detox",
+  fiber: "fibra", probiotic: "probiótico", digestive: "digestivo", enzyme: "enzima",
+  immune: "imunológico", elderberry: "sabugueiro", mushroom: "cogumelo", ashwagandha: "ashwagandha",
+  magnesium: "magnésio", metabolism: "metabolismo", booster: "impulsionador",
+  pelvic: "pélvico", floor: "assoalho", cramp: "cólica", menstrual: "menstrual",
+  feminine: "feminino", menopause: "menopausa", stretch: "estria", mark: "marca",
+  postpartum: "pós-parto", recovery: "recuperação", curling: "modelador", rod: "bastão",
+  silk: "seda", turban: "turbante", satin: "cetim", pillowcase: "fronha",
+  water: "água", flosser: "fio dental", tongue: "língua", scraper: "raspador",
+  charcoal: "carvão", lozenges: "pastilhas", bunion: "joanete", corrector: "corretor",
+  posture: "postura", reminder: "lembrete", band: "faixa", circulation: "circulação",
+  plantar: "plantar", fasciitis: "fascite", splint: "tala", stimulator: "estimulador",
+  cupping: "ventosa", therapy: "terapia", kinesiology: "cinesiologia", tape: "fita",
+  foam: "espuma", vibrating: "vibratório", plunge: "imersão", tub: "banheira",
+  grip: "pegada", strengthener: "fortalecedor", zinc: "zinco", acne: "acne",
+  spot: "ponto", treatment: "tratamento", eczema: "eczema", psoriasis: "psoríase",
+  soothing: "calmante", balm: "bálsamo", keratosis: "queratose", pilaris: "pilar",
+  rosacea: "rosácea", redness: "vermelhidão", removal: "remoção", wash: "sabonete",
+  salicylic: "salicílico", microneedling: "microagulhamento", derma: "derma",
+  radiofrequency: "radiofrequência", tightening: "firmamento", wand: "bastão",
+  patch: "adesivo", sheet: "lâmina", essential: "essencial", diffuser: "difusor",
+  portable: "portátil", stress: "estresse", weighted: "com peso", anxiety: "ansiedade",
+  ring: "anel", fidget: "fidget", meditation: "meditação", cushion: "almofada",
+  acupressure: "acupressão", mat: "tapete", elastic: "elástico", groomer: "aparador",
+  trimmer: "aparador", ear: "orelha", nose: "nariz", waterproof: "à prova d'água",
+  manscaping: "aparagem masculina", electric: "elétrico", sonic: "sônico", uv: "uv",
+  cordless: "sem fio", rechargeable: "recarregável", reusable: "reutilizável",
+  press: "pressão", on: "em", file: "lixa", cuticle: "cutícula", pen: "caneta",
+  jade: "jade", bag: "bolsa", lash: "cílio", lip: "lábio", plumper: "volumizador",
+  bloating: "inchaço", gut: "intestino", health: "saúde", gel: "gel",
+  moss: "musgo", sea: "mar", d3: "d3", k2: "k2", omega: "ômega", softgels: "cápsulas moles",
+  cbd: "cbd", jacket: "jaqueta", mobility: "mobilidade", aid: "auxílio", chews: "petiscos",
+  senior: "idoso", dental: "dental", additive: "aditivo", nasal: "nasal",
+  aspirator: "aspirador", carrier: "carregador", ergonomic: "ergonômico",
+  soother: "chupeta", maker: "máquina", food: "alimento", breastfeeding: "amamentação",
+  supplement: "suplemento", ph: "ph", balance: "equilíbrio", vibration: "vibração",
+  plate: "plataforma", memory: "memória", noise: "ruído", machine: "máquina",
+  smart: "inteligente", lavender: "lavanda", spray: "spray", snore: "ronco",
+  temperature: "temperatura", control: "controle", reflexology: "reflexologia",
+  infrared: "infravermelho", heating: "aquecedor", calf: "panturrilha", hand: "mão",
+  spa: "spa", shiatsu: "shiatsu", percussion: "percussão", mini: "mini",
+  arch: "arco", insoles: "palmilhas", heel: "calcanhar", arthritis: "artrite",
+  gloves: "luvas", ems: "eletroestimulação", reliever: "aliviador", unit: "unidade",
+  hip: "quadril", tens: "tens", lumbar: "lombar", wrist: "pulso", cervical: "cervical",
+  relief15lb: "alívio 15lb", "15lb": "6,8kg",
+};
+
+function traduzirNomeMercado(nomeMercado) {
+  const nomeProduto = nomeMercado.replace(/^Mercado:\s*/i, "");
+  const palavras = nomeProduto.split(/\s+/);
+  const traduzidas = palavras.map((p) => {
+    const limpo = p.toLowerCase().replace(/[^a-z0-9]/g, "");
+    return DICIONARIO_PT[limpo] || p;
+  });
+  return traduzidas.join(" ");
+}
+
+// ═══ DIAGNÓSTICO ═══
+async function carregarMercados() {
+  const markets = await sb("markets?select=nome&order=nome.asc");
+  const select = document.getElementById("select-mercado");
+  select.innerHTML = '<option value="">Selecione um mercado...</option>' + markets.map((m) => {
+    const traducao = traduzirNomeMercado(m.nome);
+    return `<option value="${m.nome}">${m.nome} — (${traducao})</option>`;
+  }).join("");
+}
+
+document.getElementById("btn-diagnostico").onclick = async () => {
+  const nome = document.getElementById("select-mercado").value;
+  if (!nome) { alert("Selecione um mercado."); return; }
+  const resultEl = document.getElementById("diag-result");
+  resultEl.style.display = "block";
+  resultEl.innerHTML = "Gerando diagnóstico...";
+
+  try {
+    const markets = await sb(`markets?nome=eq.${encodeURIComponent(nome)}&select=id`);
+    const market = markets[0];
+    const base = (await sb(`market_health_base?market_id=eq.${market.id}&order=calculado_em.desc&limit=1`))[0];
+    const membros = await sb(`market_members?market_id=eq.${market.id}&status=eq.confirmado&select=produto_kw`);
+    const kws = membros.map((m) => m.produto_kw);
+
+    const gate = await podeUtilizarLote(kws, "intelligence_engine");
+    if (!gate.permitido) {
+      resultEl.innerHTML = `<h4 style="color:#f85149">BLOQUEADO PELO INTEGRITY GATE</h4>` + gate.bloqueados.map((b) => `<div class="item risk">• ${b.motivo}</div>`).join("");
+      return;
+    }
+
+    resultEl.innerHTML = `
+      <h4 style="color:#3fb950">${nome} — (${traduzirNomeMercado(nome)})</h4>
+      <div class="item">• Mercado com ${base.produtos_count} produtos, maturidade "${base.maturidade}", ${base.diversidade_roles} papel(éis) comercial(is).</div>
+      <h4 style="margin-top:12px">Cobertura</h4>
+      <div class="item warn">• Meta Ads / Google Trends: sem dado real (coleta manual)</div>
+      <div class="item">• Confiança média do DNA: ${base.confianca_media_dna}%</div>
+    `;
+  } catch (e) {
+    resultEl.innerHTML = `<span style="color:#f85149">Erro: ${e.message}</span>`;
+  }
+};
+
+carregarMercados();
+</script>
+</body>
+</html>
