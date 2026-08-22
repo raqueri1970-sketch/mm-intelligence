@@ -31,6 +31,35 @@ input[type=file], select, input[type=text]{width:100%;background:#0d1117;border:
 #diag-result .opp{color:#3fb950}
 #diag-result .risk{color:#f85149}
 #diag-result .warn{color:#e3b341}
+
+#ads-intelligence{grid-column:1/3}
+.ads-toolbar{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:start}
+.ads-toolbar .btn{width:auto;min-width:150px}
+.ads-summary{display:flex;gap:10px;flex-wrap:wrap;margin:12px 0}
+.metric-pill{background:#0d1117;border:1px solid #30363d;border-radius:999px;padding:6px 10px;font-size:11px;color:#8b949e}
+.metric-pill strong{color:#e6edf3}
+.ads-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:12px}
+.ad-card{background:#0d1117;border:1px solid #30363d;border-radius:10px;overflow:hidden;cursor:pointer;transition:.15s transform,.15s border-color}
+.ad-card:hover{transform:translateY(-2px);border-color:#58a6ff}
+.ad-thumb{width:100%;height:145px;object-fit:cover;background:#161b22;display:block}
+.ad-placeholder{height:145px;display:flex;align-items:center;justify-content:center;color:#8b949e;background:linear-gradient(135deg,#161b22,#0d1117);font-size:12px}
+.ad-body{padding:12px}
+.ad-title{font-size:13px;font-weight:700;margin-bottom:6px}
+.ad-meta{font-size:11px;color:#8b949e;line-height:1.5}
+.grade{display:inline-block;padding:2px 7px;border-radius:999px;background:rgba(88,166,255,.14);color:#58a6ff;font-weight:700}
+.decision{color:#e3b341;font-weight:700}
+.empty-state{padding:24px;text-align:center;color:#8b949e;border:1px dashed #30363d;border-radius:10px;grid-column:1/-1}
+dialog{max-width:680px;width:calc(100% - 28px);background:#161b22;color:#e6edf3;border:1px solid #30363d;border-radius:12px;padding:0}
+dialog::backdrop{background:rgba(0,0,0,.72)}
+.modal-head{display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid #30363d}
+.modal-content{padding:18px;max-height:70vh;overflow:auto}
+.modal-content h4{color:#58a6ff;margin:14px 0 6px}
+.modal-content p,.modal-content li{font-size:12px;line-height:1.6;color:#c9d1d9}
+.modal-close{background:transparent;border:0;color:#8b949e;font-size:22px;cursor:pointer}
+.link-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.link-btn{display:inline-block;background:#1f6feb;color:white;text-decoration:none;padding:8px 11px;border-radius:7px;font-size:12px;font-weight:700}
+@media(max-width:760px){body{padding:14px 10px}.container{grid-template-columns:1fr}#full-cycle,#ads-intelligence{grid-column:1}.ads-toolbar{grid-template-columns:1fr}.ads-toolbar .btn{width:100%}.ads-grid{grid-template-columns:1fr}.ad-thumb,.ad-placeholder{height:190px}}
+
 </style>
 </head>
 <body>
@@ -62,7 +91,28 @@ input[type=file], select, input[type=text]{width:100%;background:#0d1117;border:
     <button class="btn" id="btn-diagnostico">Gerar Diagnóstico</button>
     <div id="diag-result" style="display:none"></div>
   </div>
+
+  <div class="card" id="ads-intelligence">
+    <h3>🕵️ Vigilância de Anúncios da Concorrência</h3>
+    <p>Cadastre a URL de uma loja ou concorrente. O MM preserva anúncios, criativos, páginas de destino e evidências sem confundir sinais com vendas comprovadas.</p>
+    <div class="ads-toolbar">
+      <input type="text" id="watch-url" placeholder="https://loja-concorrente.com">
+      <input type="text" id="watch-name" placeholder="Nome da loja (opcional)">
+      <select id="watch-market"><option value="US">EUA (US)</option><option value="MX">México (MX)</option></select>
+      <button class="btn" id="btn-watch">Adicionar à vigilância</button>
+    </div>
+    <div id="watch-feedback" class="ad-meta"></div>
+    <div class="ads-summary" id="ads-summary"></div>
+    <div class="ads-grid" id="ads-grid"><div class="empty-state">Carregando anúncios...</div></div>
+  </div>
+
 </div>
+
+<dialog id="ad-dialog">
+  <div class="modal-head"><strong id="ad-dialog-title">Detalhes do anúncio</strong><button class="modal-close" id="ad-dialog-close" aria-label="Fechar">×</button></div>
+  <div class="modal-content" id="ad-dialog-content"></div>
+</dialog>
+
 
 <script>
 const SUPABASE_URL = "https://tazyeczbbgspqbyluynf.supabase.co";
@@ -465,6 +515,136 @@ document.getElementById("btn-diagnostico").onclick = async () => {
 };
 
 carregarMercados();
+
+// ═══ MM COMPETITIVE ADS INTELLIGENCE ═══
+const adsState = { ads: [], stores: [] };
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const arr = (value) => Array.isArray(value) ? value : [];
+const obj = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+const firstMediaUrl = (ad) => {
+  const item = arr(ad.media).find((m) => m && m.identity_validated && /^https?:\/\//i.test(m.url || ""));
+  return ad.image_identity_validated ? (item?.url || null) : null;
+};
+function evidenceOf(ad) {
+  const evidence = obj(ad.evidence);
+  return { grade: evidence.grade || "D", confidence: Number(evidence.confidence || 0) };
+}
+function normalizarCreative(row) {
+  return {
+    id: row.id, ad_key: "creative:" + row.id, platform: row.plataforma || "other",
+    advertiser_name: row.anunciante || "Anunciante não informado", product_name: row.produto_kw,
+    country: "US", status_observed: "unknown", snapshot_at: row.coletado_em,
+    source_url: row.creative_url, landing_page_url: row.landing_url,
+    media: row.thumbnail_url ? [{type:"thumbnail",url:row.thumbnail_url,identity_validated:!!row.verificado}] : [],
+    copy: {headline:row.titulo}, analysis:{creative_format:row.formato,creative_pattern:row.angulo},
+    signals: obj(row.metricas_publicas), evidence: obj(row.evidencia),
+    decision: row.verificado ? "observe" : "revalidate", decision_reason: row.verificado ? "Criativo verificado no MM." : "Aguardando validação de identidade.",
+    image_identity_validated: !!row.verificado
+  };
+}
+function renderAds() {
+  const grid = document.getElementById("ads-grid");
+  const summary = document.getElementById("ads-summary");
+  const verified = adsState.ads.filter((a) => a.image_identity_validated).length;
+  const active = adsState.ads.filter((a) => a.status_observed === "active").length;
+  summary.innerHTML = [
+    ["Lojas monitoradas", adsState.stores.length],
+    ["Anúncios/criativos", adsState.ads.length],
+    ["Ativos observados", active],
+    ["Imagens validadas", verified]
+  ].map(([label,value]) => `<span class="metric-pill">${esc(label)}: <strong>${value}</strong></span>`).join("");
+  if (!adsState.ads.length) {
+    grid.innerHTML = '<div class="empty-state">Nenhum anúncio coletado ainda. Cadastre uma loja acima; o monitoramento começará quando o coletor autorizado executar.</div>';
+    return;
+  }
+  grid.innerHTML = adsState.ads.map((ad, index) => {
+    const ev = evidenceOf(ad), image = firstMediaUrl(ad);
+    return `<article class="ad-card" data-ad-index="${index}" tabindex="0" role="button" aria-label="Abrir anúncio de ${esc(ad.advertiser_name)}">
+      ${image ? `<img class="ad-thumb" src="${esc(image)}" alt="${esc(ad.product_name || ad.advertiser_name)}" loading="lazy">` : '<div class="ad-placeholder">Imagem ainda não validada</div>'}
+      <div class="ad-body">
+        <div class="ad-title">${esc(ad.product_name || obj(ad.copy).headline || "Produto não identificado")}</div>
+        <div class="ad-meta">${esc(ad.advertiser_name)} · ${esc(String(ad.platform || "").toUpperCase())} · ${esc(ad.country || "—")}</div>
+        <div class="ad-meta"><span class="grade">Evidência ${esc(ev.grade)} · ${ev.confidence}%</span> <span class="decision">${esc(ad.decision || "revalidate")}</span></div>
+      </div>
+    </article>`;
+  }).join("");
+  grid.querySelectorAll(".ad-card").forEach((card) => {
+    const open = () => abrirAd(Number(card.dataset.adIndex));
+    card.addEventListener("click", open);
+    card.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } });
+  });
+}
+function listHtml(items, emptyText) {
+  return arr(items).length ? "<ul>" + arr(items).map((x) => `<li>${esc(typeof x === "string" ? x : JSON.stringify(x))}</li>`).join("") + "</ul>" : `<p>${esc(emptyText)}</p>`;
+}
+function abrirAd(index) {
+  const ad = adsState.ads[index], evidence = obj(ad.evidence), analysis = obj(ad.analysis), signals = obj(ad.signals), copy = obj(ad.copy);
+  document.getElementById("ad-dialog-title").textContent = ad.product_name || copy.headline || "Detalhes do anúncio";
+  document.getElementById("ad-dialog-content").innerHTML = `
+    <p><strong>Anunciante:</strong> ${esc(ad.advertiser_name)} · <strong>Plataforma:</strong> ${esc(ad.platform)} · <strong>País:</strong> ${esc(ad.country)}</p>
+    <p><strong>Status observado:</strong> ${esc(ad.status_observed)} · <strong>Snapshot:</strong> ${esc(ad.snapshot_at ? new Date(ad.snapshot_at).toLocaleString("pt-BR") : "não disponível")}</p>
+    <h4>Mensagem</h4><p><strong>Dor:</strong> ${esc(analysis.pain_point || "não disponível")}<br><strong>Promessa:</strong> ${esc(analysis.promise || "não disponível")}<br><strong>CTA:</strong> ${esc(copy.cta || "não disponível")}</p>
+    <h4>Fatos observados</h4>${listHtml(evidence.observed_facts, "Nenhum fato registrado.")}
+    <h4>Sinais indiretos</h4>${listHtml(evidence.indirect_signals, Object.keys(signals).length ? JSON.stringify(signals) : "Nenhum sinal registrado.")}
+    <h4>Inferências</h4>${listHtml(evidence.inferences, "Nenhuma inferência registrada.")}
+    <h4>Limitações</h4>${listHtml(evidence.missing_data, "Nenhuma limitação registrada.")}
+    <h4>Decisão MM</h4><p><strong>${esc(ad.decision || "revalidate")}</strong> — ${esc(ad.decision_reason || "Sem justificativa registrada.")}</p>
+    <div class="link-row">
+      ${ad.source_url ? `<a class="link-btn" href="${esc(ad.source_url)}" target="_blank" rel="noopener noreferrer">Abrir fonte</a>` : ""}
+      ${ad.landing_page_url ? `<a class="link-btn" href="${esc(ad.landing_page_url)}" target="_blank" rel="noopener noreferrer">Abrir página do produto</a>` : ""}
+    </div>`;
+  document.getElementById("ad-dialog").showModal();
+}
+async function carregarAdsIntelligence() {
+  try {
+    const [stores, ads, creatives] = await Promise.all([
+      sb("mm_store_watchlist?select=id,domain,store_name,market_code,status&order=last_seen_at.desc"),
+      sb("mm_ads_dashboard?select=*&order=snapshot_at.desc&limit=100"),
+      sb("mm_product_creatives?select=*&order=coletado_em.desc&limit=100")
+    ]);
+    adsState.stores = stores || [];
+    const seen = new Set((ads || []).map((a) => a.ad_key));
+    adsState.ads = [...(ads || []), ...(creatives || []).map(normalizarCreative).filter((a) => !seen.has(a.ad_key))];
+    renderAds();
+  } catch (e) {
+    document.getElementById("ads-grid").innerHTML = `<div class="empty-state">Não foi possível carregar a Vigilância: ${esc(e.message)}</div>`;
+  }
+}
+document.getElementById("btn-watch").onclick = async () => {
+  const feedback = document.getElementById("watch-feedback");
+  try {
+    const raw = document.getElementById("watch-url").value.trim();
+    const url = new URL(/^https?:\/\//i.test(raw) ? raw : "https://" + raw);
+    const domain = url.hostname.toLowerCase().replace(/^www\./, "");
+    if (!domain.includes(".")) throw new Error("Informe uma URL válida.");
+    const existing = await sb(`mm_store_watchlist?domain=eq.${encodeURIComponent(domain)}&select=id`);
+    if (existing.length) throw new Error("Essa loja já está na vigilância.");
+    await sb("mm_store_watchlist", {
+      method: "POST",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify([{
+        domain,
+        store_name: document.getElementById("watch-name").value.trim() || null,
+        market_code: document.getElementById("watch-market").value,
+        niche: "health_beauty",
+        platform: null,
+        discovery_source: "manual_dashboard",
+        status: "WATCHING",
+        metadata: { submitted_url: url.href, skill: "mm-competitive-ads", evidence_status: "pending" }
+      }])
+    });
+    feedback.innerHTML = '<span class="log-ok">✓ Loja adicionada. Aguardando a próxima coleta autorizada.</span>';
+    document.getElementById("watch-url").value = "";
+    document.getElementById("watch-name").value = "";
+    await carregarAdsIntelligence();
+  } catch (e) {
+    feedback.innerHTML = `<span class="log-err">${esc(e.message)}</span>`;
+  }
+};
+document.getElementById("ad-dialog-close").onclick = () => document.getElementById("ad-dialog").close();
+document.getElementById("ad-dialog").addEventListener("click", (e) => { if (e.target.id === "ad-dialog") e.target.close(); });
+carregarAdsIntelligence();
+
 </script>
 </body>
 </html>
