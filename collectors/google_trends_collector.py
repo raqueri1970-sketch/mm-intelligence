@@ -1,10 +1,8 @@
 """MM Intelligence — Google Trends collector.
 
-Purpose: collect search-interest signals only. This does not sell, advertise,
-or transact on Google. It writes candidate signals to Supabase for the MM
-pipeline. The official Google Trends API is Alpha/approval-only, so this
-collector is a temporary bridge using the public Trends web data via pytrends.
-When official API credentials become available, replace only fetch_trends().
+Collect Google Trends intelligence for physical-product discovery and persist
+signals to Supabase. The workflow must fail if collection or persistence fails,
+so a green GitHub Action always means data was actually written.
 """
 import json
 import os
@@ -17,7 +15,6 @@ from pytrends.request import TrendReq
 SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
 SUPABASE_KEY = os.environ["SUPABASE_ANON_KEY"]
 
-# Broad physical-product pain/problem seeds. No infoproducts/capsules.
 SEEDS = [
     "foot pain relief product",
     "back pain relief device",
@@ -31,8 +28,7 @@ SEEDS = [
     "home beauty device",
 ]
 REGIONS = ["US", "MX"]
-
-BLOCKED = ("capsule", "capsules", "supplement", "course", "ebook", "pdf", "training program")
+BLOCKED = ("capsule", "capsules", "supplement", "course", "ebook", "pdf", "training program", "massager", "massage")
 
 
 def physical_only(term: str) -> bool:
@@ -81,11 +77,14 @@ def write_signal(name: str, signal: dict):
         "processado": False,
     }]
     r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
-    r.raise_for_status()
+    if not r.ok:
+        raise RuntimeError(f"Supabase write failed ({r.status_code}): {r.text[:500]}")
 
 
 def main():
     now = datetime.now(timezone.utc).isoformat()
+    errors = []
+    written = 0
     for geo in REGIONS:
         for seed in SEEDS:
             if not physical_only(seed):
@@ -94,12 +93,22 @@ def main():
                 data = fetch_trends(seed, geo)
                 signal = {"source": "Google Trends", "geo": geo, "seed": seed, "collected_at": now, **data}
                 write_signal(seed, signal)
+                written += 1
                 print(f"OK {geo} {seed}: {data['latest_interest']} growth={data['growth_pct']}%")
                 for item in data["rising_queries"]:
                     write_signal(item["query"], {"source": "Google Trends Rising", "geo": geo, "parent_seed": seed, "trend_value": item["value"], "collected_at": now})
+                    written += 1
                 time.sleep(2)
             except Exception as exc:
-                print(f"ERROR {geo} {seed}: {exc}")
+                msg = f"{geo} {seed}: {exc}"
+                errors.append(msg)
+                print(f"ERROR {msg}")
+
+    print(f"SUMMARY written={written} errors={len(errors)}")
+    if errors:
+        raise RuntimeError("Google Trends collection incomplete: " + " | ".join(errors))
+    if written == 0:
+        raise RuntimeError("Google Trends collector wrote zero signals")
 
 
 if __name__ == "__main__":
