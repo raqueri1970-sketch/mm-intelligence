@@ -28,7 +28,7 @@ SEEDS = [
     "home beauty device",
 ]
 REGIONS = ["US", "MX"]
-BLOCKED = ("capsule", "capsules", "supplement", "course", "ebook", "pdf", "training program", "massager", "massage")
+BLOCKED = ("capsule", "capsules", "supplement", "course", "ebook", "pdf", "training program")
 
 
 def physical_only(term: str) -> bool:
@@ -64,18 +64,8 @@ def fetch_trends(seed: str, geo: str):
 
 def write_signal(name: str, signal: dict):
     url = f"{SUPABASE_URL}/rest/v1/collector_signals"
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=minimal",
-    }
-    payload = [{
-        "coletor": "google_trends",
-        "produto_nome_bruto": name,
-        "sinal": signal,
-        "processado": False,
-    }]
+    headers = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}", "Content-Type": "application/json", "Prefer": "return=minimal"}
+    payload = [{"coletor": "google_trends", "produto_nome_bruto": name, "sinal": signal, "processado": False}]
     r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
     if not r.ok:
         raise RuntimeError(f"Supabase write failed ({r.status_code}): {r.text[:500]}")
@@ -103,7 +93,6 @@ def main():
                 msg = f"{geo} {seed}: {exc}"
                 errors.append(msg)
                 print(f"ERROR {msg}")
-
     print(f"SUMMARY written={written} errors={len(errors)}")
     if errors:
         raise RuntimeError("Google Trends collection incomplete: " + " | ".join(errors))
