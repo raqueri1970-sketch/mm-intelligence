@@ -2,6 +2,12 @@ name: MM Google Trends Collector
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'collectors/google_trends_collector.py'
+      - 'requirements-trends.txt'
+      - '.github/workflows/google-trends.yml'
   schedule:
     - cron: '25 10 * * *'
 
@@ -11,7 +17,7 @@ permissions:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -22,6 +28,6 @@ jobs:
       - run: pip install -r requirements-trends.txt
       - name: Collect Google Trends intelligence
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_URL: https://tazyeczbbgspqbyluynf.supabase.co
+          SUPABASE_ANON_KEY: sb_publishable_olCaCIksSYJGOaAYInXHeA_2pm-gaoF
         run: python collectors/google_trends_collector.py
