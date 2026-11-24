@@ -32,7 +32,7 @@ async function baixarTudo(urls: string[], esperaMaxMs = 100000) {
   const ids = new Map<number, string>();
   for (let i = 0; i < urls.length; i += 50) {
     const lote = urls.slice(i, i + 50);
-    const r = await sql`select u.url, net.http_get(u.url, headers := jsonb_build_object('User-Agent', ${UA}, 'Accept', 'application/json'), timeout_milliseconds := 20000) id
+    const r = await sql`select u.url, net.http_get(u.url, headers := jsonb_build_object('User-Agent', ${UA}::text, 'Accept', 'application/json'), timeout_milliseconds := 20000) id
       from unnest(${lote}::text[]) u(url)`;
     r.forEach((x: any) => ids.set(Number(x.id), x.url));
   }
