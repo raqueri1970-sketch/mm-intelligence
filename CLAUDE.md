@@ -17,5 +17,5 @@ Projeto **separado** da Esposende. Nada do MM vai para o repositório `portal-es
 - `supabase/functions/mm-minerador` (ver README da pasta). Ranking em `mm_minerador_ranking`, log em `mm_minerador_runs`.
 - pg_cron: 07:20 BRT `mm-minerador-fila`, 07:30 BRT `mm-minerador-diario`. Tarefa "Caça-produto" às 10:00 (usa o PC se ligado; celular + e-mail r-aqueri@hotmail.com).
 - PC do Ricardo (Desktop Commander, dispositivo `D-90-001167`): usar às 10:00 para Meta Ad Library, TikTok e AliExpress, **sempre avisando antes**. Se estiver desligado, pular e avisar.
-- AliExpress: no PC usar PowerShell com sessão (`C:\Temp\mm\ali.ps1`); Python urllib cai em loop de redirect. Da nuvem, o AliExpress devolve captcha.
+- AliExpress: no PC usar `C:\Temp\mm\ali2.ps1` (Chrome invisível, máx. 45 s por página; cópia em `scripts/pc/`). Muitas páginas seguidas = captcha (marcado `bloqueado`). Da nuvem, o AliExpress devolve captcha.
 - Margem: o Ricardo calcula. O minerador entrega produto + similar no AliExpress (link + foto conferidos).
