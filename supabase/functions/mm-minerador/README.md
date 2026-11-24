@@ -1,4 +1,4 @@
-# mm-minerador — Minerador ShopPainless (v1, custo zero)
+# mm-minerador — Minerador ShopPainless (v1.2, custo zero)
 
 Roda todo dia às 07:30 (Brasília) pelo pg_cron (`mm-minerador-diario`, 10:30 UTC) e grava o ranking em
 `public.mm_minerador_ranking` (log em `public.mm_minerador_runs`).
@@ -7,7 +7,8 @@ Roda todo dia às 07:30 (Brasília) pelo pg_cron (`mm-minerador-diario`, 10:30 U
 1. Pega os até 150 melhores de `mm_meta_vencedores` da última data (anúncios reais da Meta coletados pelo MM).
 2. Descarta o que não é produto de loja: WhatsApp/redes/marketplaces, serviços, cursos, suplementos.
 3. **Abre a loja na hora** (`/products/<handle>.js` ou `/products.json` da Shopify) e acha o produto do anúncio:
-   preço real, disponibilidade, link verificado.
+   preço real, disponibilidade, link verificado. As páginas são baixadas **pelo banco (pg_net)**, porque a Shopify
+   bloqueia com HTTP 429 o IP compartilhado das Edge Functions. `public.mm_minerador_slim()` reduz o JSON no banco.
 4. Cruza com Google Trends (coletor do GitHub Actions) quando o termo bate.
 5. Nota 0–100 e confiança:
    - **ALTA**: produto achado na loja, disponível, preço US$15–100, anúncio ≥30 dias, ≥3 anúncios, base Meta ≤7 dias.

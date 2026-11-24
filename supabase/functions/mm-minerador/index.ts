@@ -1,14 +1,13 @@
 // MM · Minerador ShopPainless v1 — ranking diário de produtos para testar.
 // Custo zero: roda no Supabase (pg_cron -> esta função), sem PC e sem chave paga.
 // Regra das 2 fontes: Meta Ad Library (anúncios reais coletados pelo MM) + página real da loja
-// (products.json da Shopify, aberta na hora). Google Trends entra como 3ª fonte de reforço.
+// (products.json da Shopify, baixada na hora pelo banco via pg_net). Google Trends entra como 3ª fonte de reforço.
 // Só vai como aprovado o que tiver confiança ALTA ou MÉDIA. Link só aparece como verificado se abriu agora.
 import postgres from "npm:postgres@3.4.3";
 const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 2 });
 const H = { "Content-Type": "application/json" };
-const VERSAO = "v1.0";
+const VERSAO = "v1.2";
 const CANDIDATOS = 150;
-const CONCORRENCIA = 10;
 const MXN_USD = 18.5; // aproximado, só para a faixa de preço
 const PRECO_MIN_USD = 15, PRECO_MAX_USD = 100, IDEAL_MIN = 25, IDEAL_MAX = 75;
 
@@ -24,16 +23,35 @@ function jaccard(a: string[], b: string[]) {
   let i = 0; for (const x of A) if (B.has(x)) i++;
   return i / Math.min(A.size, B.size);
 }
-async function getJson(url: string, ms = 9000) {
-  const ac = new AbortController(); const t = setTimeout(() => ac.abort(), ms);
-  try {
-    const r = await fetch(url, { signal: ac.signal, redirect: "follow", headers: { "User-Agent": "Mozilla/5.0 (compatible; MM-Minerador/1.0)", Accept: "application/json" } });
-    if (!r.ok) return null;
-    const ct = r.headers.get("content-type") || "";
-    if (!ct.includes("json")) return null;
-    return await r.json();
-  } catch { return null; } finally { clearTimeout(t); }
+const falhas: Record<string, string> = {};
+// As lojas Shopify bloqueiam (HTTP 429) o IP compartilhado das Edge Functions. Por isso as páginas são
+// baixadas pelo próprio banco (pg_net), que sai por outro IP: enfileira tudo, espera as respostas e lê.
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+const respostas = new Map<string, any>();
+async function baixarTudo(urls: string[], esperaMaxMs = 100000) {
+  const ids = new Map<number, string>();
+  for (let i = 0; i < urls.length; i += 50) {
+    const lote = urls.slice(i, i + 50);
+    const r = await sql`select u.url, net.http_get(u.url, headers := jsonb_build_object('User-Agent', ${UA}, 'Accept', 'application/json'), timeout_milliseconds := 20000) id
+      from unnest(${lote}::text[]) u(url)`;
+    r.forEach((x: any) => ids.set(Number(x.id), x.url));
+  }
+  const ini = Date.now(); let faltam = [...ids.keys()];
+  while (faltam.length && Date.now() - ini < esperaMaxMs) {
+    await new Promise((ok) => setTimeout(ok, 3000));
+    const rs = await sql`select id, status_code, timed_out, error_msg, case when status_code = 200 then public.mm_minerador_slim(content) end j from net._http_response where id = any(${faltam}::bigint[])`;
+    for (const x of rs) {
+      const url = ids.get(Number(x.id))!;
+      if (x.status_code === 200) { if (x.j) respostas.set(url, x.j); else falhas[url] = "não é JSON"; }
+      else falhas[url] = x.status_code ? `HTTP ${x.status_code}` : (x.timed_out ? "tempo esgotado" : String(x.error_msg || "erro").slice(0, 60));
+    }
+    const prontos = new Set(rs.map((x: any) => Number(x.id)));
+    faltam = faltam.filter((id) => !prontos.has(id));
+  }
+  for (const id of faltam) falhas[ids.get(id)!] = "tempo esgotado";
 }
+function getJson(url: string) { return respostas.get(url) ?? null; }
+const urlCatalogo = (host: string) => `https://${host}/products.json?limit=250`;
 function hosts(dominio: string, link: string) {
   const out: string[] = [];
   try { if (link) out.push(new URL(link).hostname); } catch { /* */ }
@@ -43,14 +61,18 @@ function hosts(dominio: string, link: string) {
 }
 function handleDoLink(link: string) { const m = (link || "").match(/\/products\/([a-z0-9\-_%.]+)/i); return m ? decodeURIComponent(m[1]).replace(/\.js$/, "") : null; }
 
-async function checarLoja(c: Cand) {
+function urlsDe(c: Cand) {
+  const handle = handleDoLink(c.link);
+  return hosts(c.dominio, c.link).flatMap((h) => handle ? [`https://${h}/products/${handle}.js`, urlCatalogo(h)] : [urlCatalogo(h)]);
+}
+function checarLoja(c: Cand) {
   const handle = handleDoLink(c.link);
   for (const host of hosts(c.dominio, c.link)) {
     if (handle) {
-      const p = await getJson(`https://${host}/products/${handle}.js`);
+      const p = getJson(`https://${host}/products/${handle}.js`);
       if (p && p.title) return { host, loja_ok: true, total: null, prod: { title: p.title, handle: p.handle || handle, price: Number(p.price) / 100, image: p.featured_image ? (String(p.featured_image).startsWith("//") ? "https:" + p.featured_image : p.featured_image) : null, available: !!p.available, created_at: p.created_at }, metodo: "link do anúncio" };
     }
-    const j = await getJson(`https://${host}/products.json?limit=250`);
+    const j = getJson(urlCatalogo(host));
     if (!j || !Array.isArray(j.products)) continue;
     const prods = j.products.filter((p: any) => p && p.title);
     if (!prods.length) return { host, loja_ok: true, total: 0, prod: null, metodo: "loja sem produtos" };
@@ -68,7 +90,8 @@ async function checarLoja(c: Cand) {
     };
     return { host, loja_ok: true, total: prods.length, prod: best ? conv(best) : null, metodo: best ? metodo : "produto não achado na loja" };
   }
-  return { host: null, loja_ok: false, total: null, prod: null, metodo: "loja não abriu / não é Shopify" };
+  const hs = hosts(c.dominio, c.link); const erro = hs.map((h) => falhas[urlCatalogo(h)]).filter(Boolean)[0] || "sem resposta";
+  return { host: null, loja_ok: false, total: null, prod: null, metodo: `loja não abriu / não é Shopify (${erro})` };
 }
 
 function trendsDe(c: Cand, sinais: any[]) {
@@ -85,6 +108,7 @@ function trendsDe(c: Cand, sinais: any[]) {
 }
 
 async function rodar(dataBase?: string) {
+  respostas.clear(); for (const k of Object.keys(falhas)) delete falhas[k];
   const d = dataBase || (await sql`select max(data)::text d from public.mm_meta_vencedores`)[0].d;
   const cands: Cand[] = await sql`select * from public.mm_meta_vencedores where data = ${d} order by nota desc limit ${CANDIDATOS}`;
   const sinais = (await sql`select produto_nome_bruto termo, sinal->>'geo' geo, (sinal->>'growth_pct')::numeric growth, (sinal->>'latest_interest')::numeric atual, sinal->>'source' fonte, coletado_em
@@ -98,12 +122,8 @@ async function rodar(dataBase?: string) {
     if (!c.dominio || DOMINIO_BLOQ.test(c.dominio) || TITULO_BLOQ.test(`${c.titulo} ${(c.texto || "").slice(0, 120)}`)) { bloqueados++; continue; }
     fila.push(c);
   }
-  const lojas: any[] = new Array(fila.length);
-  for (let i = 0; i < fila.length; i += CONCORRENCIA) {
-    const lote = fila.slice(i, i + CONCORRENCIA);
-    const r = await Promise.all(lote.map(checarLoja));
-    r.forEach((x, k) => (lojas[i + k] = x));
-  }
+  await baixarTudo([...new Set(fila.flatMap(urlsDe))]);
+  const lojas: any[] = fila.map(checarLoja);
 
   const linhas: any[] = [];
   fila.forEach((c, i) => {
@@ -124,7 +144,7 @@ async function rodar(dataBase?: string) {
     score = Math.min(100, Math.round(score * 10) / 10);
 
     const precoOk = precoUsd != null && precoUsd >= PRECO_MIN_USD && precoUsd <= PRECO_MAX_USD;
-    if (!L.loja_ok) motivos.push("loja não confirmada (não abriu ou não é Shopify)");
+    if (!L.loja_ok) motivos.push(L.metodo);
     else if (!P) motivos.push("loja abre, mas o produto do anúncio não foi achado nela");
     if (P && P.available === false) motivos.push("produto esgotado na loja");
     if (precoUsd == null) motivos.push("preço não confirmado");
