@@ -1,6 +1,8 @@
-# mm-minerador — Minerador ShopPainless (v1.2, custo zero)
+# mm-minerador — Minerador ShopPainless (v1.3, custo zero)
 
-Roda todo dia às 07:30 (Brasília) pelo pg_cron (`mm-minerador-diario`, 10:30 UTC) e grava o ranking em
+Roda todo dia em 2 etapas pelo pg_cron: 07:20 (Brasília) `mm-minerador-fila` (`{"acao":"fila"}`) pede as páginas das lojas
+ao pg_net; 07:30 `mm-minerador-diario` (ranking) lê as respostas. São 2 chamadas porque a própria chamada da função
+ocupa o lote do pg_net enquanto roda. O ranking e grava o ranking em
 `public.mm_minerador_ranking` (log em `public.mm_minerador_runs`).
 
 ## Como decide
@@ -20,5 +22,5 @@ Roda todo dia às 07:30 (Brasília) pelo pg_cron (`mm-minerador-diario`, 10:30 U
 ```sql
 select net.http_post(url:=(select decrypted_secret from vault.decrypted_secrets where name='mm_project_url')||'/functions/v1/mm-minerador',
   headers:=jsonb_build_object('Content-Type','application/json','x-mm-cron',(select decrypted_secret from vault.decrypted_secrets where name='mm_cron_secret')),
-  body:='{}'::jsonb, timeout_milliseconds:=150000);
+  body:='{"acao":"fila"}'::jsonb   -- e 5 min depois de novo com body '{}' (ranking), timeout_milliseconds:=150000);
 ```

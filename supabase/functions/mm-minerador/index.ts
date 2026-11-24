@@ -6,7 +6,7 @@
 import postgres from "npm:postgres@3.4.3";
 const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 2 });
 const H = { "Content-Type": "application/json" };
-const VERSAO = "v1.2";
+const VERSAO = "v1.3";
 const CANDIDATOS = 150;
 const MXN_USD = 18.5; // aproximado, só para a faixa de preço
 const PRECO_MIN_USD = 15, PRECO_MAX_USD = 100, IDEAL_MIN = 25, IDEAL_MAX = 75;
@@ -28,27 +28,29 @@ const falhas: Record<string, string> = {};
 // baixadas pelo próprio banco (pg_net), que sai por outro IP: enfileira tudo, espera as respostas e lê.
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 const respostas = new Map<string, any>();
-async function baixarTudo(urls: string[], esperaMaxMs = 100000) {
-  const ids = new Map<number, string>();
+// Etapa 1 ("fila"): pede as páginas ao pg_net e guarda os ids. Etapa 2 ("ranking", minutos depois): lê as respostas.
+// Precisa ser em 2 chamadas: enquanto esta função roda, a própria chamada dela ocupa o lote do pg_net.
+async function enfileirar(urls: string[]) {
+  await sql`delete from public.mm_minerador_fetch where run_date = current_date`;
   for (let i = 0; i < urls.length; i += 50) {
     const lote = urls.slice(i, i + 50);
-    const r = await sql`select u.url, net.http_get(u.url, headers := jsonb_build_object('User-Agent', ${UA}::text, 'Accept', 'application/json'), timeout_milliseconds := 20000) id
+    await sql`insert into public.mm_minerador_fetch (url, req_id)
+      select u.url, net.http_get(u.url, headers := jsonb_build_object('User-Agent', ${UA}::text, 'Accept', 'application/json'), timeout_milliseconds := 20000)
       from unnest(${lote}::text[]) u(url)`;
-    r.forEach((x: any) => ids.set(Number(x.id), x.url));
   }
-  const ini = Date.now(); let faltam = [...ids.keys()];
-  while (faltam.length && Date.now() - ini < esperaMaxMs) {
-    await new Promise((ok) => setTimeout(ok, 3000));
-    const rs = await sql`select id, status_code, timed_out, error_msg, case when status_code = 200 then public.mm_minerador_slim(content) end j from net._http_response where id = any(${faltam}::bigint[])`;
-    for (const x of rs) {
-      const url = ids.get(Number(x.id))!;
-      if (x.status_code === 200) { if (x.j) respostas.set(url, x.j); else falhas[url] = "não é JSON"; }
-      else falhas[url] = x.status_code ? `HTTP ${x.status_code}` : (x.timed_out ? "tempo esgotado" : String(x.error_msg || "erro").slice(0, 60));
-    }
-    const prontos = new Set(rs.map((x: any) => Number(x.id)));
-    faltam = faltam.filter((id) => !prontos.has(id));
+  return urls.length;
+}
+async function lerRespostas() {
+  const rs = await sql`select f.url, r.status_code, r.timed_out, r.error_msg, case when r.status_code = 200 then public.mm_minerador_slim(r.content) end j
+    from public.mm_minerador_fetch f left join net._http_response r on r.id = f.req_id where f.run_date = current_date`;
+  let pendentes = 0;
+  for (const x of rs) {
+    if (x.status_code === 200) { if (x.j) respostas.set(x.url, x.j); else falhas[x.url] = "não é JSON"; }
+    else if (x.status_code) falhas[x.url] = `HTTP ${x.status_code}`;
+    else if (x.timed_out || x.error_msg) falhas[x.url] = x.timed_out ? "tempo esgotado" : String(x.error_msg).slice(0, 60);
+    else { falhas[x.url] = "sem resposta ainda"; pendentes++; }
   }
-  for (const id of faltam) falhas[ids.get(id)!] = "tempo esgotado";
+  return { total: rs.length, pendentes };
 }
 function getJson(url: string) { return respostas.get(url) ?? null; }
 const urlCatalogo = (host: string) => `https://${host}/products.json?limit=250`;
@@ -107,7 +109,7 @@ function trendsDe(c: Cand, sinais: any[]) {
   return best;
 }
 
-async function rodar(dataBase?: string) {
+async function rodar(acao: string, dataBase?: string) {
   respostas.clear(); for (const k of Object.keys(falhas)) delete falhas[k];
   const d = dataBase || (await sql`select max(data)::text d from public.mm_meta_vencedores`)[0].d;
   const cands: Cand[] = await sql`select * from public.mm_meta_vencedores where data = ${d} order by nota desc limit ${CANDIDATOS}`;
@@ -122,7 +124,10 @@ async function rodar(dataBase?: string) {
     if (!c.dominio || DOMINIO_BLOQ.test(c.dominio) || TITULO_BLOQ.test(`${c.titulo} ${(c.texto || "").slice(0, 120)}`)) { bloqueados++; continue; }
     fila.push(c);
   }
-  await baixarTudo([...new Set(fila.flatMap(urlsDe))]);
+  const urls = [...new Set(fila.flatMap(urlsDe))];
+  if (acao === "fila") return { versao: VERSAO, etapa: "fila", base_meta: d, urls: await enfileirar(urls) };
+  let leitura = await lerRespostas();
+  if (!leitura.total) { await enfileirar(urls); return { versao: VERSAO, etapa: "fila", aviso: "fila criada agora; rode o ranking daqui a 5 minutos" }; }
   const lojas: any[] = fila.map(checarLoja);
 
   const linhas: any[] = [];
@@ -173,9 +178,9 @@ async function rodar(dataBase?: string) {
     await t`delete from public.mm_minerador_ranking where run_date = current_date`;
     if (uniq.length) await t`insert into public.mm_minerador_ranking ${t(uniq, "base_meta","posicao","pais","produto","loja","link_produto","link_verificado","imagem","preco","moeda","preco_usd","n_ads","dias_no_ar","cresc_anunciante_pct","trends","fontes","n_fontes","score","confianca","aprovado","motivos")}`;
   });
-  const cont = { versao: VERSAO, base_meta: d, candidatos: cands.length, bloqueados, analisados: fila.length, lojas_ok: lojas.filter((l) => l.loja_ok).length,
+  const cont = { versao: VERSAO, base_meta: d, paginas: leitura.total, sem_resposta: leitura.pendentes, candidatos: cands.length, bloqueados, analisados: fila.length, lojas_ok: lojas.filter((l) => l.loja_ok).length,
     produto_confirmado: lojas.filter((l) => l.prod).length, alta: uniq.filter((x) => x.confianca === "ALTA").length, media: uniq.filter((x) => x.confianca === "MEDIA").length };
-  const aviso = metaIdadeDias > 2 ? `ATENÇÃO: base do Meta é de ${d} (${metaIdadeDias} dias)` : "";
+  const aviso = [metaIdadeDias > 2 ? `ATENÇÃO: base do Meta é de ${d} (${metaIdadeDias} dias)` : "", leitura.pendentes > leitura.total * 0.2 ? `ATENÇÃO: ${leitura.pendentes} de ${leitura.total} páginas sem resposta` : ""].filter(Boolean).join(" | ");
   await sql`insert into public.mm_minerador_runs (ok, mensagem, contagem) values (${true}, ${aviso || "ok"}, ${sql.json(cont)})`;
   return { ...cont, aviso };
 }
@@ -185,7 +190,7 @@ Deno.serve(async (req) => {
     const s = (await sql`select decrypted_secret from vault.decrypted_secrets where name = 'mm_cron_secret'`)[0]?.decrypted_secret || "";
     if (!s || req.headers.get("x-mm-cron") !== s) return new Response(JSON.stringify({ ok: false, error: "unauthorized" }), { status: 401, headers: H });
     const b = await req.json().catch(() => ({}));
-    return new Response(JSON.stringify({ ok: true, ...(await rodar(b.data)) }), { headers: H });
+    return new Response(JSON.stringify({ ok: true, ...(await rodar(String(b.acao || "ranking"), b.data)) }), { headers: H });
   } catch (e) {
     console.error(e);
     await sql`insert into public.mm_minerador_runs (ok, mensagem) values (false, ${String((e as Error)?.message || e)})`.catch(() => {});
