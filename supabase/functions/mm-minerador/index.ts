@@ -6,13 +6,16 @@
 import postgres from "npm:postgres@3.4.3";
 const sql = postgres(Deno.env.get("SUPABASE_DB_URL")!, { prepare: false, max: 2 });
 const H = { "Content-Type": "application/json" };
-const VERSAO = "v1.3";
+const VERSAO = "v1.4";
 const CANDIDATOS = 150;
 const MXN_USD = 18.5; // aproximado, só para a faixa de preço
 const PRECO_MIN_USD = 15, PRECO_MAX_USD = 100, IDEAL_MIN = 25, IDEAL_MAX = 75;
 
 const DOMINIO_BLOQ = /(whatsapp|wa\.me|facebook|instagram|fb\.me|fb\.com|linktr|bit\.ly|google\.|youtube|tiktok\.com|amazon\.|walmart\.|etsy\.|ebay\.|mercadolibre|temu\.|shein\.)/i;
 const TITULO_BLOQ = /(chatea|whatsapp|appointment|consulta|clinic|cl[ií]nica|book now|agenda|webinar|course|curso|ebook|e-book|free trial|subscription|suscripci|supplement|suplemento|capsul|c[aá]psula|gummies|gomitas|vitamin|tablets|pastillas|laser facial|\(\$\d+ value\))/i;
+// Regra do Ricardo (25/11/2026): SÓ saúde e beleza. Roupa, calçado, artigo esportivo e roupa de cama ficam de fora.
+const ROUPA = /\b(leggings?|calzas?|mallas?|pants|jeans|shorts?|skirts?|faldas?|dress(es)?|vestidos?|bras?|bralettes?|sujetador(es)?|brassiere|lingerie|underwear|panties|calz[oó]n(es)?|bodysuits?|shapewear|fajas?|corsets?|cors[eé]s?|shirts?|t-shirts?|tees?|camisas?|camisetas?|blusas?|hoodies?|sudaderas?|jackets?|chaquetas?|chamarras?|sweaters?|su[eé]teres?|cardigans?|swimsuits?|swimwear|bikinis?|ba[nñ]adores?|pajamas?|pijamas?|robes?|socks?|calcetines|sneakers?|shoes?|zapatos?|tenis|sandals?|sandalias|boots?|botas|slippers?|pantuflas|jerseys?|uniforms?|futbol|f[uú]tbol|soccer|football|bed ?sheets?|fitted sheets?|duvets?|comforters?|edred[oó]n(es)?|s[aá]banas)\b/i;
+const DOMINIO_ROUPA = /(futbol|soccer|football|apparel|clothing|wear\.|shoes|legging|lingerie|swim)/i;
 const STOP = new Set("the and for with your you this that from best new our are not all get one use how why what before after more less buy now off free shop sale only just los las del para con por una que sus mas más the una tu".split(" "));
 
 type Cand = Record<string, any>;
@@ -117,11 +120,12 @@ async function rodar(acao: string, dataBase?: string) {
      from public.collector_signals where coletor = 'google_trends' and coletado_em > now() - interval '7 days'`).map((r: any) => ({ ...r, growth: r.growth == null ? null : Number(r.growth) }));
   const metaIdadeDias = Math.round((Date.now() - new Date(d + "T00:00:00Z").getTime()) / 864e5);
 
-  const vistos = new Set<string>(); const fila: Cand[] = []; let bloqueados = 0;
+  const vistos = new Set<string>(); const fila: Cand[] = []; let bloqueados = 0; let roupa = 0;
   for (const c of cands) {
     const k = `${c.pais}|${(c.dominio || "").toLowerCase()}|${tokens(c.titulo).slice(0, 4).join(" ")}`;
     if (vistos.has(k)) continue; vistos.add(k);
     if (!c.dominio || DOMINIO_BLOQ.test(c.dominio) || TITULO_BLOQ.test(`${c.titulo} ${(c.texto || "").slice(0, 120)}`)) { bloqueados++; continue; }
+    if (ROUPA.test(`${c.titulo || ""} ${(c.texto || "").slice(0, 120)}`) || DOMINIO_ROUPA.test(c.dominio || "")) { roupa++; continue; }
     fila.push(c);
   }
   const urls = [...new Set(fila.flatMap(urlsDe))];
@@ -132,7 +136,8 @@ async function rodar(acao: string, dataBase?: string) {
 
   const linhas: any[] = [];
   fila.forEach((c, i) => {
-    const L = lojas[i]; const P = L.prod; const motivos: string[] = []; const fontes: any[] = [];
+    const L = lojas[i]; const P = L.prod;
+    if (P && ROUPA.test(P.title || "")) { roupa++; return; } const motivos: string[] = []; const fontes: any[] = [];
     const cresc = Number(c.sinais?.cresc_anunciante_pct ?? 0);
     fontes.push({ fonte: "Meta Ad Library (coleta MM)", base: d, idade_dias: metaIdadeDias, anuncios: c.n_ads, dias_no_ar: c.dias_max, maior_anunciante: c.maior_anunciante });
     const moeda = c.pais === "MX" ? "MXN" : "USD";
@@ -178,7 +183,7 @@ async function rodar(acao: string, dataBase?: string) {
     await t`delete from public.mm_minerador_ranking where run_date = current_date`;
     if (uniq.length) await t`insert into public.mm_minerador_ranking ${t(uniq, "base_meta","posicao","pais","produto","loja","link_produto","link_verificado","imagem","preco","moeda","preco_usd","n_ads","dias_no_ar","cresc_anunciante_pct","trends","fontes","n_fontes","score","confianca","aprovado","motivos")}`;
   });
-  const cont = { versao: VERSAO, base_meta: d, paginas: leitura.total, sem_resposta: leitura.pendentes, candidatos: cands.length, bloqueados, analisados: fila.length, lojas_ok: lojas.filter((l) => l.loja_ok).length,
+  const cont = { versao: VERSAO, base_meta: d, paginas: leitura.total, sem_resposta: leitura.pendentes, candidatos: cands.length, bloqueados, roupa_fora: roupa, analisados: fila.length, lojas_ok: lojas.filter((l) => l.loja_ok).length,
     produto_confirmado: lojas.filter((l) => l.prod).length, alta: uniq.filter((x) => x.confianca === "ALTA").length, media: uniq.filter((x) => x.confianca === "MEDIA").length };
   const aviso = [metaIdadeDias > 2 ? `ATENÇÃO: base do Meta é de ${d} (${metaIdadeDias} dias)` : "", leitura.pendentes > leitura.total * 0.2 ? `ATENÇÃO: ${leitura.pendentes} de ${leitura.total} páginas sem resposta` : ""].filter(Boolean).join(" | ");
   await sql`insert into public.mm_minerador_runs (ok, mensagem, contagem) values (${true}, ${aviso || "ok"}, ${sql.json(cont)})`;

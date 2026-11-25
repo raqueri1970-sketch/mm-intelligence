@@ -13,6 +13,11 @@ Projeto **separado** da Esposende. Nada do MM vai para o repositório `portal-es
 4. Dizer de quando é o dado (data da base).
 5. Regra das 2 fontes para número decisivo (anúncios ativos, tendência, preço): 2 fontes independentes, 1 oficial aberta na hora.
 
+## REGRA DE NICHO (Ricardo, 25/11/2026)
+**SEMPRE SÓ SAÚDE E BELEZA. NUNCA ROUPA.** Fora: legging, calça, short, vestido, sutiã, cinta/faja, camiseta, moletom, pijama, meia,
+calçado, artigo esportivo (futebol) e roupa de cama. Ficam: joelheira/suporte ortopédico, massageador, creme, sérum, aparelho de beleza,
+produto para dor. O minerador bloqueia isso no código (`ROUPA` e `DOMINIO_ROUPA` em `supabase/functions/mm-minerador/index.ts`).
+
 ## Minerador
 - `supabase/functions/mm-minerador` (ver README da pasta). Ranking em `mm_minerador_ranking`, log em `mm_minerador_runs`.
 - pg_cron: 07:20 BRT `mm-minerador-fila`, 07:30 BRT `mm-minerador-diario`. Tarefa "Caça-produto" às 10:00 (usa o PC se ligado; celular + e-mail r-aqueri@hotmail.com).
